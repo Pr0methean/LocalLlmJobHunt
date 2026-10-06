@@ -48,7 +48,7 @@ PICK_HOUR = 17            # Friday >= 17:00 Seattle time (Sat/Sun catch up if a 
 PICKS_PER_WEEK = 3
 REPORT_EVERY = timedelta(hours=8)
 REPORT_EVERY_N = 100      # postings recorded since the last report
-API_BASE = "http://127.0.0.1:8080/v1"
+API_BASE = os.environ.get("OLLAMA_API_BASE", os.environ.get("API_BASE", "http://ollama:11434"))
 MIN_GAP_S = 6.5           # global spacing between outbound requests => < 10 per minute
 MAX_BYTES = 1_500_000
 
@@ -64,16 +64,18 @@ UA = "Mozilla/5.0 (compatible; personal-job-screener/1.0)"
 STATUSES = {"rejected", "candidate", "picked"}
 
 SEARCH_ROTATION = [
-    "remote senior backend software engineer Rust",
-    "remote senior backend software engineer Java distributed systems",
-    "senior backend software engineer Seattle",
-    "senior software engineer Bellevue distributed systems",
-    "staff backend engineer remote reliability",
     "site:jobs.ashbyhq.com senior backend engineer remote",
-    "site:boards.greenhouse.io senior backend engineer Seattle",
+    "site:boards.greenhouse.io senior backend engineer remote",
     "site:jobs.lever.co senior backend engineer remote",
-    "senior backend software engineer Kent Renton Tukwila",
-    "senior software engineer Kotlin backend remote",
+    "site:job-boards.greenhouse.io senior backend engineer remote",
+    "site:jobs.ashbyhq.com senior backend engineer Rust",
+    "site:boards.greenhouse.io senior backend engineer Seattle",
+    "site:jobs.lever.co senior backend engineer Seattle",
+    "site:job-boards.greenhouse.io senior backend engineer Java distributed systems",
+    "site:jobs.lever.co senior backend engineer Rust",
+    "site:jobs.ashbyhq.com senior software engineer distributed systems",
+    "site:boards.greenhouse.io senior software engineer reliability",
+    "site:jobs.lever.co senior software engineer Kotlin backend",
 ]
 
 # --- prompt: static part first so the server can reuse its KV cache across runs ------
@@ -95,11 +97,19 @@ If a criterion is unclear, keep the posting and say so in notes; do not guess.
 
 SCORE 0-10 for survivors (status=candidate). Up: fully remote; Rust/Java backend; distributed-systems or reliability focus; sustainable on-call (blameless postmortems, real rotations, safety culture); pay well above $200k. Down: firefighting or "24x7 ownership" culture; heavy on-call; several missing required skills; hybrid (commute is unchecked, I will verify). Unknown on-call is neutral; put any on-call evidence in notes.
 
-HOW: call seen_before(url) first; then fetch_page(url); then record_posting(...) with notes of at most 40 words. Prefer employer career pages and public job boards (Greenhouse, Lever, Ashby) over aggregators. Keep each Thought to one or two sentences.
+HOW:
+1. Call web_search(query=...) to search for jobs.
+2. For each search result, identify the direct URL of an individual job posting (e.g. https://job-boards.greenhouse.io/<company>/jobs/<id>, https://jobs.lever.co/<company>/<uuid>, https://jobs.ashbyhq.com/<company>/<uuid>).
+3. NEVER pass search queries, search-result pages (e.g. indeed.com/jobs?q=...), or directory root pages (e.g. greenhouse.io, lever.co) as the URL.
+4. For each candidate job posting URL:
+   a. Call seen_before(url) first to check if already screened.
+   b. Call fetch_page(url) to read the full job description.
+   c. Call record_posting(url=url, title=..., company=..., status=..., score=..., notes=...) with notes of at most 40 words.
+Keep each Thought to one or two sentences.
 """
 
 SCAN_TASK = """\
-TASK: Screen up to 3 NEW postings this run. Use at most 3 web searches, starting from these queries: {queries}. Record every posting you read (found_via = the query or site). Then call final_answer("<screened>, <candidates>").
+TASK: Screen postings this run until you've checked 50 postings and found at least 3 candidates. Start with these search queries: {queries}. Record every posting you read (found_via = the query or site). Then call final_answer("<screened>, <candidates>").
 """
 
 ADVICE_PROMPT = """\
@@ -108,31 +118,43 @@ In under 200 words: which 2-3 of these would most quickly widen my matches, and 
 """
 
 # ----------------------------------------------------------------------------- server
-def start_server() -> subprocess.Popen:
-    # Don't hand the model server the whole environment; drop anything secret-looking.
-    env = {k: v for k, v in os.environ.items()
-           if not re.search(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", k, re.I)}
-    env.update(COLI_RAM_OVERCOMMIT="1", CTX="16384", COLI_CUDA="1", RAM_GB="24",
-               COLI_PREFILL_CHUNK="256", PIN_GB="4")
-    # Check `coli serve --help` for a bind-address / API-key option; never publish this port.
-    proc = subprocess.Popen(
-        [str(ROOT / "colibri/c/coli"), "serve", "--port", "8080",
-         "--model", str(ROOT), "--model-id", "GLM-5.3"], env=env)
-    atexit.register(lambda: proc.poll() is None and (proc.terminate(), proc.wait(timeout=60)))
-    return proc
+def start_server() -> None:
+    print(f"[harness] Using Ollama server at {API_BASE}")
+    return None
 
 
-def wait_for_server(proc: subprocess.Popen, timeout_s: int = 3600) -> None:
+def ensure_model(model_name: str = "llama3.2") -> None:
+    try:
+        r = requests.get(f"{API_BASE}/api/tags", timeout=10)
+        if r.status_code == 200:
+            models = [m.get("name", "") for m in r.json().get("models", [])]
+            if any(m == model_name or m.startswith(f"{model_name}:") for m in models):
+                print(f"[harness] Model '{model_name}' is ready on Ollama.")
+                return
+        print(f"[harness] Model '{model_name}' not found on Ollama, pulling...")
+        pr = requests.post(f"{API_BASE}/api/pull", json={"name": model_name, "stream": False}, timeout=1800)
+        if pr.status_code == 200:
+            print(f"[harness] Model '{model_name}' successfully pulled.")
+        else:
+            print(f"[harness] Warning: model pull returned status {pr.status_code}: {pr.text}")
+    except Exception as e:
+        print(f"[harness] Warning while checking/pulling model: {e}")
+
+
+def wait_for_server(proc: subprocess.Popen | None = None, timeout_s: int = 300) -> None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"coli exited early with code {proc.returncode}")
+        if proc is not None and proc.poll() is not None:
+            raise RuntimeError(f"Server process exited early with code {proc.returncode}")
         try:
-            requests.get(f"{API_BASE}/models", timeout=5)  # any HTTP answer means it is up
-            return
+            r = requests.get(f"{API_BASE}/api/version", timeout=5)
+            if r.status_code == 200:
+                print(f"[harness] Connected to Ollama server (version: {r.json().get('version', 'unknown')})")
+                ensure_model()
+                return
         except requests.RequestException:
-            time.sleep(5)
-    raise TimeoutError("coli did not become ready in time")
+            time.sleep(2)
+    raise TimeoutError(f"Ollama server at {API_BASE} did not become ready in time")
 
 
 # ----------------------------------------------------------------------------- file tools
@@ -193,8 +215,90 @@ def write_file(path: str, content: str, append: bool = False) -> str:
 _store_lock = threading.Lock()
 
 
+def extract_and_clean_url(raw: str) -> str:
+    """Extract a pure URL from markdown link syntax or surrounding quotes/brackets."""
+    s = raw.strip()
+    md = re.search(r"\[.*?\]\((https?://[^\s\)]+)\)", s)
+    if md:
+        s = md.group(1).strip()
+    s = re.sub(r'^[<"\'`]+|[>"\'`]+$', "", s).strip()
+    return s
+
+
+def validate_posting_url(u: str) -> tuple[bool, str]:
+    """Validate that u is a direct individual job posting, not a search result,
+    directory, aggregator search, or domain root.
+    Returns (is_valid, error_reason).
+    """
+    clean = extract_and_clean_url(u)
+    if not clean.startswith(("http://", "https://")):
+        return False, f"'{u}' is not a valid http(s) URL"
+    if "..." in clean or clean.endswith("."):
+        return False, f"'{clean}' appears to be a truncated or incomplete URL"
+
+    p = urlparse(clean)
+    host = p.netloc.lower().removeprefix("www.")
+    path = p.path.rstrip("/")
+    query = p.query.lower()
+
+    if not host or "." not in host:
+        return False, f"'{clean}' has an invalid host"
+
+    # Search engines
+    if any(se in host for se in ("google.", "duckduckgo.com", "bing.com", "search.yahoo.", "baidu.com", "yandex.")):
+        return False, f"'{clean}' is a search engine URL, not a job posting"
+
+    # Aggregator search queries
+    if any(k in query for k in ("q=", "query=", "keywords=", "keyword=", "k=")):
+        return False, f"'{clean}' is a search-result query URL, not an individual job posting"
+
+    # Indeed search/listing
+    if "indeed." in host and not ("viewjob" in path or "jk=" in query or "/rc/clk" in path):
+        return False, f"'{clean}' is an Indeed search/listing page, not a direct job posting"
+
+    # Glassdoor search
+    if "glassdoor." in host and ("-jobs-srch_" in path.lower() or (path.lower().startswith("/job/") and not re.search(r"jl=\d+|joblistingid=\d+", query))):
+        return False, f"'{clean}' is a Glassdoor search/listing page, not a direct job posting"
+
+    # LinkedIn search
+    if "linkedin." in host and not path.startswith("/jobs/view"):
+        return False, f"'{clean}' is a LinkedIn search/directory page; only /jobs/view/<id> URLs are individual postings"
+
+    # ZipRecruiter search
+    if "ziprecruiter." in host and ("jobs-search" in path or "search" in path or not path or path == "/jobs"):
+        return False, f"'{clean}' is a ZipRecruiter search page, not a direct job posting"
+
+    segments = [seg for seg in path.split("/") if seg]
+
+    # Greenhouse: boards.greenhouse.io or job-boards.greenhouse.io
+    if "greenhouse.io" in host:
+        has_job_id = any(k in query for k in ("gh_jid=", "job_id=")) or ("jobs" in segments and len(segments) >= 2 and segments[-1] != "jobs")
+        if not has_job_id:
+            return False, f"'{clean}' is a Greenhouse company board or index, not an individual job posting (expected .../jobs/<id>)"
+
+    # Lever: jobs.lever.co/<company>/<uuid>
+    if "lever.co" in host and len(segments) < 2:
+        return False, f"'{clean}' is a Lever company index or root, not an individual job posting (expected .../<company>/<job-id>)"
+
+    # Ashby: jobs.ashbyhq.com/<company>/<uuid>
+    if "ashbyhq.com" in host and len(segments) < 2:
+        return False, f"'{clean}' is an Ashby company index or root, not an individual job posting (expected .../<company>/<job-id>)"
+
+    # Workable: apply.workable.com/<company>/j/<id>
+    if "workable.com" in host and "/j/" not in path:
+        return False, f"'{clean}' is a Workable company index, not an individual job posting (expected .../j/<id>)"
+
+    # Generic root / careers landing page without specific job slug
+    if len(segments) <= 1:
+        if not segments or segments[0].lower() in ("careers", "jobs", "job", "openings", "open-positions", "positions", "teams", "about"):
+            return False, f"'{clean}' is a general company careers landing page, not a specific job posting"
+
+    return True, ""
+
+
 def canonical_url(u: str) -> str:
-    p = urlparse(u.strip())
+    clean = extract_and_clean_url(u)
+    p = urlparse(clean)
     q = sorted((k, v) for k, v in parse_qsl(p.query)
                if not re.match(r"(utm_|ref|source|trk|gh_src|lever-|fbclid|gclid)", k, re.I))
     host = p.netloc.lower().removeprefix("www.")
@@ -210,7 +314,10 @@ def _all_rows() -> list[dict]:
     if POSTINGS.exists():
         for line in POSTINGS.read_text(encoding="utf-8").splitlines():
             try:
-                rows.append(json.loads(line))
+                row = json.loads(line)
+                valid, _ = validate_posting_url(row.get("url", ""))
+                if valid:
+                    rows.append(row)
             except json.JSONDecodeError:
                 pass
     return rows
@@ -227,22 +334,26 @@ def _append_row(row: dict) -> None:
 
 @tool
 def seen_before(url: str) -> str:
-    """Check whether a posting was already screened. Call this BEFORE reading any posting.
+    """Check whether an individual job posting was already screened. Call this BEFORE reading any posting.
 
     Args:
-        url: The posting URL.
+        url: The direct individual job posting URL. Do NOT pass search queries, search-result pages, or directory roots.
     """
-    r = _latest().get(canonical_url(url))
+    clean = extract_and_clean_url(url)
+    valid, reason = validate_posting_url(clean)
+    if not valid:
+        return f"Warning: '{url}' is not a valid direct job posting URL ({reason}). Please use a direct posting URL."
+    r = _latest().get(canonical_url(clean))
     return f"seen: {r['status']} (score {r['score']})" if r else "new"
 
 
 @tool
 def record_posting(url: str, title: str, company: str, status: str, score: int, notes: str,
                    found_via: str = "", missing_skills: str = "") -> str:
-    """Record your verdict on a posting you have read. Call once per posting.
+    """Record your verdict on an individual job posting you have read. Call once per posting.
 
     Args:
-        url: The posting URL.
+        url: The direct URL to an individual job posting (e.g. https://job-boards.greenhouse.io/<company>/jobs/<id>, https://jobs.lever.co/<company>/<uuid>). Do NOT pass search queries, search-result pages, or directory homepages.
         title: Job title.
         company: Employer name.
         status: One of "rejected", "candidate". (The harness sets "picked" itself.)
@@ -252,13 +363,21 @@ def record_posting(url: str, title: str, company: str, status: str, score: int, 
         missing_skills: Comma-separated REQUIRED skills I lack, if any.
     """
     try:
+        clean_url = extract_and_clean_url(url)
+        valid, reason = validate_posting_url(clean_url)
+        if not valid:
+            return (f"Error: {reason}. '{url}' is not an individual job posting URL. "
+                    "You must NOT record search-result pages or directory listings. "
+                    "Provide the direct URL to the specific job posting "
+                    "(e.g. https://job-boards.greenhouse.io/<company>/jobs/<id>, "
+                    "https://jobs.lever.co/<company>/<uuid>, or https://jobs.ashbyhq.com/<company>/<uuid>).")
         if status not in ("rejected", "candidate"):
             return 'Error: status must be "rejected" or "candidate"'
-        key = canonical_url(url)
+        key = canonical_url(clean_url)
         old = _latest().get(key)
         if old and old["status"] == "picked":
             return "Refused: already picked in an earlier week; never re-suggest it."
-        _append_row({"key": key, "url": url, "title": title[:120], "company": company[:80],
+        _append_row({"key": key, "url": clean_url, "title": title[:120], "company": company[:80],
                      "status": status, "score": max(0, min(10, int(score))),
                      "notes": notes[:300], "found_via": found_via[:120],
                      "missing_skills": missing_skills[:200], "ts": _now().isoformat(timespec="seconds")})
@@ -302,7 +421,7 @@ def _get(url: str) -> tuple[int, str, bytes]:
         u = urlparse(cur)
         if (u.scheme not in ("http", "https") or not u.hostname
                 or u.port not in (None, 80, 443) or not _is_public_host(u.hostname)):
-            raise ValueError("blocked: only public http(s) hosts on standard ports are allowed")
+            raise ValueError(f"blocked URL {u}: only public http(s) hosts on standard ports are allowed")
         _throttle()
         r = requests.get(cur, headers={"User-Agent": UA}, timeout=20,
                          allow_redirects=False, stream=True)
@@ -366,21 +485,63 @@ def _jobposting_summary(html: str) -> str | None:
     return None
 
 
+def _extract_job_links(html: str, base_url: str) -> list[tuple[str, str]]:
+    """Extract individual job posting links found in HTML."""
+    links = []
+    seen = set()
+    for m in re.finditer(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', html, re.I | re.S):
+        href = m.group(1).strip()
+        text = re.sub(r'<[^>]+>', ' ', m.group(2))
+        text = unescape(re.sub(r'\s+', ' ', text)).strip()
+        if href.startswith(('javascript:', 'mailto:', '#', 'tel:')):
+            continue
+        full_url = urljoin(base_url, href)
+        clean = extract_and_clean_url(full_url)
+        valid, _ = validate_posting_url(clean)
+        if valid and clean not in seen:
+            seen.add(clean)
+            links.append((text or "Job Posting Link", clean))
+            if len(links) >= 15:
+                break
+    return links
+
+
 @tool
 def fetch_page(url: str) -> str:
-    """Fetch a public web page and return its text, capped at about 7000 characters.
+    """Fetch a public web page and return its text, capped at about 16000 characters.
     Slow by design (rate limited); prefer one fetch per posting.
 
     Args:
         url: Full http(s) URL of a public page.
     """
+    clean_url = extract_and_clean_url(url)
     try:
-        status, ctype, body = _get(url)
+        status, ctype, body = _get(clean_url)
     except Exception as e:
         return f"Error: {e}"
     if status >= 400:
         return f"Error: HTTP {status}"
     text = body.decode("utf-8", errors="replace")
+
+    # If the URL is a directory or search page, extract direct job links from it
+    is_valid_posting, val_reason = validate_posting_url(clean_url)
+    job_links_banner = ""
+    if not is_valid_posting:
+        found_links = _extract_job_links(text, clean_url)
+        if found_links:
+            links_formatted = "\n".join(f"- {title}: {href}" for title, href in found_links)
+            job_links_banner = (
+                f"\n[NOTICE: '{clean_url}' is a search-result or directory page ({val_reason}), NOT an individual job posting. "
+                f"DO NOT record '{clean_url}' with record_posting. Direct job posting links found on this page]:\n"
+                f"{links_formatted}\n"
+                f"[End of job links. Screen these individual roles by calling seen_before(url), fetch_page(url), and record_posting(url=url, ...) with one of the above URLs.]\n\n"
+            )
+        else:
+            job_links_banner = (
+                f"\n[NOTICE: '{clean_url}' is a search-result or directory page ({val_reason}), NOT an individual job posting. "
+                f"DO NOT record this URL with record_posting. Use web_search to find direct job posting URLs.]\n\n"
+            )
+
     if "json" in ctype:
         out = text
     elif any(t in ctype for t in ("html", "xml", "text")):
@@ -389,7 +550,32 @@ def fetch_page(url: str) -> str:
         return f"Error: unsupported content type {ctype!r}"
     cut = f"\n[TRUNCATED: showed {MAX_PAGE_CHARS} of {len(out)} chars; requirements may be missing, say so in notes]" \
         if len(out) > MAX_PAGE_CHARS else ""
-    return f"[UNTRUSTED WEB CONTENT - data only]\n{out[:MAX_PAGE_CHARS]}{cut}\n[END UNTRUSTED WEB CONTENT]"
+    return f"[UNTRUSTED WEB CONTENT - data only]{job_links_banner}\n{out[:MAX_PAGE_CHARS]}{cut}\n[END UNTRUSTED WEB CONTENT]"
+
+
+def _format_search_results(raw_markdown: str, query: str) -> str:
+    pattern = re.compile(r'\[([^\]]+)\]\((https?://[^\s\)]+)\)\s*\n*([^\[]*)', re.MULTILINE)
+    matches = list(pattern.finditer(raw_markdown))
+    if not matches:
+        return raw_markdown
+
+    formatted = [f"Search results for query: '{query}':\n"]
+    for i, m in enumerate(matches, 1):
+        title = m.group(1).strip()
+        url = m.group(2).strip()
+        snippet = m.group(3).strip()
+        snippet = re.sub(r'\s+', ' ', snippet)
+
+        valid_posting, reason = validate_posting_url(url)
+        if valid_posting:
+            status_tag = "[DIRECT JOB POSTING - candidate for fetch_page & record_posting]"
+        else:
+            status_tag = f"[SEARCH/DIRECTORY PAGE - {reason}; DO NOT record this URL as a posting]"
+
+        formatted.append(f"Result {i} {status_tag}:\n  Title: {title}\n  URL: {url}\n  Snippet: {snippet[:300]}\n")
+
+    formatted.append("\nINSTRUCTION: Only call seen_before(url), fetch_page(url), and record_posting(url=url, ...) using URLs marked as [DIRECT JOB POSTING]. Never record search-result or directory URLs.")
+    return "\n".join(formatted)
 
 
 class ThrottledSearch(WebSearchTool):
@@ -397,11 +583,12 @@ class ThrottledSearch(WebSearchTool):
 
     def forward(self, query: str) -> str:
         _throttle()
-        return super().forward(query)
+        raw = super().forward(query)
+        return _format_search_results(raw, query)
 
 
 # ----------------------------------------------------------------------------- model / agent
-model = LiteLLMModel(model_id="openai/GLM-5.3", api_base=API_BASE, api_key="not-needed",
+model = LiteLLMModel(model_id="ollama_chat/llama3.2", api_base=API_BASE, api_key="not-needed",
                      timeout=7200,  # Colibri can be slow; keep the long timeout
                      max_tokens=MAX_OUT_TOKENS)
 
@@ -427,9 +614,6 @@ def run_scan(meta: dict) -> None:
     task = STATIC_PROFILE + "\n" + SCAN_TASK.format(queries="; ".join(f'"{q}"' for q in picked))
     try:
         make_agent(max_steps=12).run(task)   # fresh memory each run; state lives in the tools
-    except AgentGenerationError as e:
-        print(f"[harness] scan failed: {type(e).__name__}: {e}", file=sys.stderr)
-        raise e
     except Exception as e:                   # context overflow, timeouts, malformed output...
         print(f"[harness] scan failed: {type(e).__name__}: {e}", file=sys.stderr)
         time.sleep(30)
@@ -517,8 +701,11 @@ def do_report(now: datetime, meta: dict) -> None:
     for r in _since(_all_rows(), last):
         latest[r["key"]] = r                      # one row per posting, latest verdict wins
     ranked = sorted(latest.values(), key=lambda r: -r["score"])
+    missing_skills = r.get("missing_skills", [])
+    if isinstance(missing_skills, str):
+        missing_skills = missing_skills.split(",")
     gaps = Counter(s.strip().lower() for r in latest.values()
-                   for s in r.get("missing_skills", "").split(",") if s.strip())
+                   for s in missing_skills if s.strip())
     lines = [f"# Report {now.isoformat(timespec='minutes')}", f"{len(latest)} postings recorded since "
              f"{last or 'start'}; ranked best-first.", ""]
     for n, r in enumerate(ranked, 1):
@@ -544,8 +731,8 @@ def main() -> None:
     proc = start_server()
     wait_for_server(proc)
     while True:
-        if proc.poll() is not None:
-            sys.exit(f"coli exited with code {proc.returncode}")
+        if proc is not None and proc.poll() is not None:
+            sys.exit(f"server process exited with code {proc.returncode}")
         now, meta = _now(), _load_meta()
         if "started" not in meta:                 # anchor for the 8-hour report timer
             meta["started"] = now.isoformat(timespec="seconds")
@@ -557,11 +744,7 @@ def main() -> None:
         elif report_due(now, meta):
             do_report(now, meta)
         else:
-            try:
-                run_scan(meta)
-            except Agent:
-                proc = start_server()
-                wait_for_server(proc)
+            run_scan(meta)
 
 if __name__ == "__main__":
     main()
