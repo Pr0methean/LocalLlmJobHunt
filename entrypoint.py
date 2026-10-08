@@ -98,13 +98,14 @@ If a criterion is unclear, keep the posting and say so in notes; do not guess.
 SCORE 0-10 for survivors (status=candidate). Up: fully remote; Rust/Java backend; distributed-systems or reliability focus; sustainable on-call (blameless postmortems, real rotations, safety culture); pay well above $200k. Down: firefighting or "24x7 ownership" culture; heavy on-call; several missing required skills; hybrid (commute is unchecked, I will verify). Unknown on-call is neutral; put any on-call evidence in notes.
 
 HOW:
-1. Call web_search(query=...) to search for jobs.
+1. Call the web_search tool (the ThrottledSearch instance in your tool list) with query=... to search for jobs.
 2. For each search result, identify the direct URL of an individual job posting (e.g. https://job-boards.greenhouse.io/<company>/jobs/<id>, https://jobs.lever.co/<company>/<uuid>, https://jobs.ashbyhq.com/<company>/<uuid>).
 3. NEVER pass search queries, search-result pages (e.g. indeed.com/jobs?q=...), or directory root pages (e.g. greenhouse.io, lever.co) as the URL.
 4. For each candidate job posting URL:
    a. Call seen_before(url) first to check if already screened.
    b. Call fetch_page(url) to read the full job description.
    c. Call record_posting(url=url, title=..., company=..., status=..., score=..., notes=...) with notes of at most 40 words.
+Each of these functions is a provided tool; do not implement them yourself.
 Keep each Thought to one or two sentences.
 """
 
@@ -287,6 +288,9 @@ def validate_posting_url(u: str) -> tuple[bool, str]:
     # Workable: apply.workable.com/<company>/j/<id>
     if "workable.com" in host and "/j/" not in path:
         return False, f"'{clean}' is a Workable company index, not an individual job posting (expected .../j/<id>)"
+
+    if "example.com" in host:
+        return False, f"'{clean}' is an example.com url, not a job posting"
 
     # Generic root / careers landing page without specific job slug
     if len(segments) <= 1:
