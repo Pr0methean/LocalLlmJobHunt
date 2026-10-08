@@ -107,6 +107,7 @@ HOW:
    c. Call record_posting(url=url, title=..., company=..., status=..., score=..., notes=...) with notes of at most 40 words.
 Each of these functions is a provided tool; do not implement them yourself.
 Keep each Thought to one or two sentences.
+If you discover something about how the provided tools work that is confusing and could be clarified by updating this prompt, write the revised prompt to a file in the prompt-updates/ folder.
 """
 
 SCAN_TASK = """\
