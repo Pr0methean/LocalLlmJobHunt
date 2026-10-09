@@ -618,7 +618,7 @@ def run_scan(meta: dict) -> None:
     _save_meta(meta)
     task = STATIC_PROFILE + "\n" + SCAN_TASK.format(queries="; ".join(f'"{q}"' for q in picked))
     try:
-        make_agent(max_steps=12).run(task)   # fresh memory each run; state lives in the tools
+        make_agent(max_steps=128).run(task)  # fresh memory each run; state lives in the tools
     except Exception as e:                   # context overflow, timeouts, malformed output...
         print(f"[harness] scan failed: {type(e).__name__}: {e}", file=sys.stderr)
         time.sleep(30)
