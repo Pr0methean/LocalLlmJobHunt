@@ -87,6 +87,7 @@ ME: Senior/staff IC. Java (10+ y), Rust (6 y), Kotlin, Python, C++. AWS; distrib
 REJECT (status=rejected; notes start with the code) if any applies:
 FE primarily front-end, or not software engineering
 ALPHA employer is Alphabet or a subsidiary (Google, Waymo, Verily, DeepMind, Wing, ...)
+LANG requires expert-level skills in a specific programming language other than Java, Kotlin or Rust
 PAY listed pay range tops out below $200k/yr ($240k/yr as contractor without benefits. Pay not listed is NOT a reject; note "pay unlisted")
 CIT requires US citizenship
 ETHIC work on military/defense systems, ICE, or warrantless police surveillance (e.g. Flock ALPR); or an employer whose main business is that. If only a side business, reject only when the role is on that team.
