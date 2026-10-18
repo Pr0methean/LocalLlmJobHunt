@@ -294,6 +294,15 @@ def validate_posting_url(u: str) -> tuple[bool, str]:
     if "example.com" in host:
         return False, f"'{clean}' is an example.com url, not a job posting"
 
+    if "wikipedia.org" in host:
+        return False, f"'{clean}' is a Wikipedia article, not a job posting"
+
+    if "nuclearmuseum.org" in host:
+        return False, f"'{clean}' is a Nuclear Museum page, not a job posting"
+
+    if "databricks.com" in host and datetime.now() < datetime(2027, 03, 01, 00, 00):
+        return False, f"I've already applied at Databricks"
+
     # Generic root / careers landing page without specific job slug
     if len(segments) <= 1:
         if not segments or segments[0].lower() in ("careers", "jobs", "job", "openings", "open-positions", "positions", "teams", "about"):
