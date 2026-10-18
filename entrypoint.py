@@ -86,6 +86,7 @@ ME: Senior/staff IC. Java (10+ y), Rust (6 y), Kotlin, Python, C++. AWS; distrib
 
 REJECT (status=rejected; notes start with the code) if any applies:
 FE primarily front-end, or not software engineering
+EXP posting is marked as expired or previously removed, or gives a 4xx error
 ALPHA employer is Alphabet or a subsidiary (Google, Waymo, Verily, DeepMind, Wing, ...)
 LANG requires expert-level skills in a specific programming language other than Java, Kotlin or Rust
 PAY listed pay range tops out below $200k/yr ($240k/yr as contractor without benefits. Pay not listed is NOT a reject; note "pay unlisted")
@@ -109,7 +110,6 @@ HOW:
 Each of these functions is a provided tool; do not implement them yourself.
 Keep each Thought to one or two sentences.
 """
-
 SCAN_TASK = """\
 TASK: Screen postings this run until you've checked 50 postings and found at least 3 candidates. Start with these search queries: {queries}. Record every posting you read (found_via = the query or site). Then call final_answer("<screened>, <candidates>").
 If you find the provided instructions misleading and determine a future instance of you would be able to start doing useful work sooner with a different prompt, write the revised prompt to a file in the prompt-updates/ folder.
@@ -617,7 +617,7 @@ def run_scan(meta: dict) -> None:
     picked = [SEARCH_ROTATION[(i + k) % len(SEARCH_ROTATION)] for k in range(3)]
     meta["query_idx"] = (i + 3) % len(SEARCH_ROTATION)
     _save_meta(meta)
-    task = STATIC_PROFILE + "\n" + SCAN_TASK.format(queries="; ".join(f'"{q}"' for q in picked))
+    task = STATIC_PROFILE + "\n" + SCAN_TASK.format(queries="; ".join(f'"{q}"' for q in picked)) + "\n" + "It is currently " + datetime.now()
     try:
         make_agent(max_steps=128).run(task)  # fresh memory each run; state lives in the tools
     except Exception as e:                   # context overflow, timeouts, malformed output...
