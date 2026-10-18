@@ -101,7 +101,7 @@ SCORE 0-10 for survivors (status=candidate). Up: fully remote; Rust/Java backend
 HOW:
 1. Call the web_search tool (the ThrottledSearch instance in your tool list) with query=... to search for jobs.
 2. For each search result, identify the direct URL of an individual job posting (e.g. https://job-boards.greenhouse.io/<company>/jobs/<id>, https://jobs.lever.co/<company>/<uuid>, https://jobs.ashbyhq.com/<company>/<uuid>).
-3. NEVER pass search queries, search-result pages (e.g. indeed.com/jobs?q=...), or directory root pages (e.g. greenhouse.io, lever.co) as the URL.
+3. NEVER pass search queries, search-result pages on job boards (e.g. indeed.com/jobs?q=...), or directory root pages (e.g. greenhouse.io, lever.co) as the URL. Crawl for and evaluate the individual job postings those pages lead to instead.
 4. For each candidate job posting URL:
    a. Call seen_before(url) first to check if already screened.
    b. Call fetch_page(url) to read the full job description.
